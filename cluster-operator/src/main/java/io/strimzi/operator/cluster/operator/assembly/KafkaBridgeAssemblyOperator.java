@@ -46,6 +46,8 @@ public class KafkaBridgeAssemblyOperator extends AbstractAssemblyOperator<Kubern
 
     private final DeploymentOperator deploymentOperations;
     private final KafkaVersion.Lookup versions;
+    
+    private boolean initializing;
 
     /**
      * @param vertx The Vertx instance
@@ -62,6 +64,8 @@ public class KafkaBridgeAssemblyOperator extends AbstractAssemblyOperator<Kubern
         super(vertx, pfa, KafkaBridge.RESOURCE_KIND, certManager, passwordGenerator, supplier.kafkaBridgeOperator, supplier, config);
         this.deploymentOperations = supplier.deploymentOperations;
         this.versions = config.versions();
+        
+        this.initializing = true;
     }
 
     @Override
@@ -83,6 +87,12 @@ public class KafkaBridgeAssemblyOperator extends AbstractAssemblyOperator<Kubern
                 null);
 
         Promise<KafkaBridgeStatus> createOrUpdatePromise = Promise.promise();
+        
+        boolean cbrConfigChanged = bridge.getCbrConfigMapChanged();
+        boolean rlConfigChanged = bridge.getRlConfigMapChanged();
+        boolean configurationChanged = cbrConfigChanged || rlConfigChanged;
+        final boolean performRollingUpdate = configurationChanged && !this.initializing;
+        this.initializing = false;
 
         boolean bridgeHasZeroReplicas = bridge.getReplicas() == 0;
         log.debug("{}: Updating Kafka Bridge cluster", reconciliation);
@@ -92,6 +102,14 @@ public class KafkaBridgeAssemblyOperator extends AbstractAssemblyOperator<Kubern
             .compose(i -> configMapOperations.reconcile(namespace, bridge.getAncillaryConfigMapName(), logAndMetricsConfigMap))
             .compose(i -> podDisruptionBudgetOperator.reconcile(namespace, bridge.getName(), bridge.generatePodDisruptionBudget()))
             .compose(i -> deploymentOperations.reconcile(namespace, bridge.getName(), bridge.generateDeployment(Collections.emptyMap(), pfa.isOpenshift(), imagePullPolicy, imagePullSecrets)))
+            .compose(i -> {
+                // if some configuration file has changed, do a rolling update
+                if (performRollingUpdate) {
+                    log.info("Performing rolling release");
+                    return deploymentOperations.rollingUpdate(namespace, bridge.getName(), operationTimeoutMs);
+                }
+                return Future.succeededFuture();
+            })
             .compose(i -> deploymentOperations.scaleUp(namespace, bridge.getName(), bridge.getReplicas()))
             .compose(i -> deploymentOperations.waitForObserved(namespace, bridge.getName(), 1_000, operationTimeoutMs))
             .compose(i -> bridgeHasZeroReplicas ? Future.succeededFuture() : deploymentOperations.readiness(namespace, bridge.getName(), 1_000, operationTimeoutMs))

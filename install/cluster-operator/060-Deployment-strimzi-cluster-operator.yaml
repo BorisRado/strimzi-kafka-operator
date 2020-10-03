@@ -23,7 +23,8 @@ spec:
             name: strimzi-cluster-operator
       containers:
         - name: strimzi-cluster-operator
-          image: strimzi/operator:latest
+          image: borisrado/operator
+          imagePullPolicy: Never
           ports:
             - containerPort: 8080
               name: http

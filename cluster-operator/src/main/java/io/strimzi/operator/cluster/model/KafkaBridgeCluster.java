@@ -4,9 +4,11 @@
  */
 package io.strimzi.operator.cluster.model;
 
+import io.fabric8.kubernetes.api.model.ConfigMap;
 import io.fabric8.kubernetes.api.model.Container;
 import io.fabric8.kubernetes.api.model.ContainerBuilder;
 import io.fabric8.kubernetes.api.model.ContainerPort;
+import io.fabric8.kubernetes.api.model.DoneableConfigMap;
 import io.fabric8.kubernetes.api.model.EnvVar;
 import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.kubernetes.api.model.IntOrString;
@@ -21,6 +23,8 @@ import io.fabric8.kubernetes.api.model.apps.DeploymentStrategy;
 import io.fabric8.kubernetes.api.model.apps.DeploymentStrategyBuilder;
 import io.fabric8.kubernetes.api.model.apps.RollingUpdateDeploymentBuilder;
 import io.fabric8.kubernetes.api.model.policy.PodDisruptionBudget;
+import io.fabric8.kubernetes.client.DefaultKubernetesClient;
+import io.fabric8.kubernetes.client.dsl.Resource;
 import io.strimzi.api.kafka.model.CertSecretSource;
 import io.strimzi.api.kafka.model.ContainerEnvVar;
 import io.strimzi.api.kafka.model.KafkaBridgeConsumerSpec;
@@ -108,6 +112,9 @@ public class KafkaBridgeCluster extends AbstractModel {
     protected static final String ENV_VAR_KAFKA_BRIDGE_CORS_ENABLED = "KAFKA_BRIDGE_CORS_ENABLED";
     protected static final String ENV_VAR_KAFKA_BRIDGE_CORS_ALLOWED_ORIGINS = "KAFKA_BRIDGE_CORS_ALLOWED_ORIGINS";
     protected static final String ENV_VAR_KAFKA_BRIDGE_CORS_ALLOWED_METHODS = "KAFKA_BRIDGE_CORS_ALLOWED_METHODS";
+    
+    protected static final String ENV_CBR_CONFIG_MAP = "ROUTING_CONFIG_MAP";
+    protected static final String ENV_RL_CONFIG_MAP = "RATE_LIMITING_CONFIG_MAP";
 
     private KafkaBridgeTls tls;
     private KafkaClientAuthentication authentication;
@@ -120,7 +127,17 @@ public class KafkaBridgeCluster extends AbstractModel {
     private List<ContainerEnvVar> templateContainerEnvVars;
     private SecurityContext templateContainerSecurityContext;
     private Tracing tracing;
-
+    
+    private static String existingRlConfig = null;
+    private static String existingCbrConfig = null;
+    
+    private String newRlConfig = null;
+    private String newCbrConfig = null;
+    private boolean errorWhileFetchingRlConfigMap = false;
+    private boolean errorWhileFetchingCbrConfigMap = false;
+    private boolean cbrConfigChanged = false;
+    private boolean rlConfigChanged = false;
+    
     /**
      * Constructor
      *
@@ -164,6 +181,8 @@ public class KafkaBridgeCluster extends AbstractModel {
         kafkaBridgeCluster.setBootstrapServers(spec.getBootstrapServers());
         kafkaBridgeCluster.setKafkaConsumerConfiguration(spec.getConsumer());
         kafkaBridgeCluster.setKafkaProducerConfiguration(spec.getProducer());
+        kafkaBridgeCluster.setRlConfigMapContent(spec.getRlConfigMap());
+        kafkaBridgeCluster.setCbrConfigMapContent(spec.getCbrConfigMap());
         if (kafkaBridge.getSpec().getLivenessProbe() != null) {
             kafkaBridgeCluster.setLivenessProbe(kafkaBridge.getSpec().getLivenessProbe());
         }
@@ -359,6 +378,24 @@ public class KafkaBridgeCluster extends AbstractModel {
         if (javaSystemProperties != null) {
             varList.add(buildEnvVar(ENV_VAR_STRIMZI_JAVA_SYSTEM_PROPERTIES, ModelUtils.getJavaSystemPropertiesToString(javaSystemProperties)));
         }
+        
+        /**
+         *  set configuration maps for content-based routing
+         *  if an error happened while fetching the configmap, apply the already existing configuration
+         *  if no error happened, apply the new configuration
+         */
+        if (!errorWhileFetchingCbrConfigMap && newCbrConfig != null) {
+            varList.add(buildEnvVar(ENV_CBR_CONFIG_MAP, this.newCbrConfig));            
+        } else if (existingCbrConfig != null && errorWhileFetchingCbrConfigMap) {
+            varList.add(buildEnvVar(ENV_CBR_CONFIG_MAP, existingCbrConfig));
+        }
+        
+        // set configuration maps for rate-limiting
+        if (!errorWhileFetchingRlConfigMap && newRlConfig != null) {
+            varList.add(buildEnvVar(ENV_RL_CONFIG_MAP, this.newRlConfig));         
+        } else if (existingRlConfig != null && errorWhileFetchingRlConfigMap) {
+            varList.add(buildEnvVar(ENV_RL_CONFIG_MAP, existingRlConfig));
+        }
 
         varList.add(buildEnvVar(ENV_VAR_KAFKA_BRIDGE_BOOTSTRAP_SERVERS, bootstrapServers));
         varList.add(buildEnvVar(ENV_VAR_KAFKA_BRIDGE_CONSUMER_CONFIG, kafkaBridgeConsumer == null ? "" : new KafkaBridgeConsumerConfiguration(kafkaBridgeConsumer.getConfig().entrySet()).getConfiguration()));
@@ -499,6 +536,117 @@ public class KafkaBridgeCluster extends AbstractModel {
     protected void setBootstrapServers(String bootstrapServers) {
         this.bootstrapServers = bootstrapServers;
     }
+    
+    protected void setCbrConfigMapContent(String mapName) {
+        if (mapName != null) {
+            this.newCbrConfig = getConfigMapData(mapName, false);
+        } else {            
+            this.newCbrConfig = null;
+        }
+    }
+    
+    protected void setRlConfigMapContent(String mapName) {
+        if (mapName != null) {
+            this.newRlConfig = getConfigMapData(mapName, true);            
+        } else {
+            this.newRlConfig = null;
+        }
+    }
+    
+    public String getCbrConfigMapContent() {
+        return this.newCbrConfig;
+    }
+    
+    public String getRlConfigMapContent() {
+        return this.newRlConfig;
+    }
+    
+    /**
+     * @param name: name of the configmap to be retrieved
+     * @param isRlConfigMap: set to true when the configmap being retrieved serves for rate limiting configuration
+     * @return the content of the configmap. If any error occurs, an Exception is thrown
+     */
+    private String getConfigMapData(String mapName, boolean isRlConfigMap) {
+        DefaultKubernetesClient client = new DefaultKubernetesClient();
+        String configMapContent = null;
+        try {
+            log.info("Searching configmap `{}` in namespace `{}`", mapName, client.getNamespace());
+            Resource<ConfigMap, DoneableConfigMap> configMapResource = client
+                    .configMaps()
+                    .inNamespace(client.getNamespace())
+                    .withName(mapName);
+            if (configMapResource == null || configMapResource.get() == null) {
+                setErrorWhileFetchingConfigMap(isRlConfigMap);
+                log.error("Some error happened while fetching the configmap with the name `{}`. The bridge will be launched "
+                        + "without the function enabled / the old configuration will be used. Make sure the configmap exists and is "
+                        + "placed in the same namespace as the strimzi deployment", mapName);
+            } else {
+                log.info("Content of configmap `" + mapName + "` successfully retrieved");
+                Map<String, String> data = configMapResource.get().getData();
+                if (data.size() == 1) {
+                    configMapContent = data
+                            .entrySet()
+                            .iterator()
+                            .next()
+                            .getValue()
+                            .replaceAll("\\s+", ""); // remove all new lines, white spaces, etc...
+                } else {
+                    setErrorWhileFetchingConfigMap(isRlConfigMap);
+                    log.error("Invalid configmap. Make sure the configmap contains only one entry.");
+                }
+            }
+        } catch (Exception e) {
+            log.error("Some error happened while fetching the configmap with the name `{}`", mapName);
+            e.printStackTrace();
+        } finally {
+            client.close();
+        }
+        return configMapContent;
+    }
+    
+    private void setErrorWhileFetchingConfigMap(boolean isRlConfigMap) {
+        if (isRlConfigMap) {
+            this.errorWhileFetchingRlConfigMap = true;
+        } else {
+            this.errorWhileFetchingCbrConfigMap = true;
+        }        
+    }
+    
+    public boolean getErrorWhileFetchingCbrConfigMap() {
+        return this.errorWhileFetchingCbrConfigMap;
+    }
+    
+    
+    public boolean getErrorWhileFetchingRlConfigMap() {
+        return this.errorWhileFetchingRlConfigMap;
+    }
+    
+    public boolean getCbrConfigMapChanged() {
+        if (errorWhileFetchingCbrConfigMap) {
+            return false;
+        } else if (existingCbrConfig == null && this.newCbrConfig != null) {
+            existingCbrConfig = this.newCbrConfig;
+            return true;
+        } else if (existingCbrConfig != null && !existingCbrConfig.equals(this.newCbrConfig)) {
+            existingCbrConfig = this.newCbrConfig;
+            return true;
+        }
+        return false;
+    }
+    
+    public boolean getRlConfigMapChanged() {
+        if (errorWhileFetchingRlConfigMap) {
+            return false;
+        } else if (existingRlConfig == null && this.newRlConfig != null) {
+            existingRlConfig = this.newRlConfig;
+            return true;
+        } else if (existingRlConfig != null && !existingRlConfig.equals(this.newRlConfig)) {
+            existingRlConfig = this.newRlConfig;
+            return true;
+        } 
+        return false;
+    }
+
 
     public KafkaBridgeHttpConfig getHttp() {
         return this.http;

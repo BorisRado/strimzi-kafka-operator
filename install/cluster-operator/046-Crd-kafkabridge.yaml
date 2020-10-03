@@ -872,6 +872,14 @@ spec:
               required:
               - type
               description: The configuration of tracing in Kafka Bridge.
+            cbrConfigMap:
+              type: string
+              description: Name of the configmap containing the content based routing
+                rules.
+            rlConfigMap:
+              type: string
+              description: Get the name of the configmap containing the rate limiting
+                rules.
           required:
           - bootstrapServers
           description: The specification of the Kafka Bridge.

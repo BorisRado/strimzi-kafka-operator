@@ -2731,6 +2731,10 @@ Used in: xref:type-KafkaBridge-{context}[`KafkaBridge`]
 |xref:type-KafkaBridgeTemplate-{context}[`KafkaBridgeTemplate`]
 |tracing           1.2+<.<|The configuration of tracing in Kafka Bridge. The type depends on the value of the `tracing.type` property within the given object, which must be one of [jaeger].
 |xref:type-JaegerTracing-{context}[`JaegerTracing`]
+|cbrConfigMap      1.2+<.<|Name of the configmap containing the content based routing rules.
+|string
+|rlConfigMap       1.2+<.<|Get the name of the configmap containing the rate limiting rules.
+|string
 |====
 
 [id='type-KafkaBridgeTls-{context}']

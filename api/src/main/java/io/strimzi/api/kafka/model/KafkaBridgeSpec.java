@@ -49,6 +49,8 @@ public class KafkaBridgeSpec extends Spec {
     private Probe readinessProbe;
     private KafkaBridgeTemplate template;
     private Tracing tracing;
+    private String cbrConfigMap;
+    private String rlConfigMap;
 
     @Description("The number of pods in the `Deployment`.")
     @Minimum(0)
@@ -212,5 +214,25 @@ public class KafkaBridgeSpec extends Spec {
 
     public void setTracing(Tracing tracing) {
         this.tracing = tracing;
+    }
+    
+    public void setCbrConfigMap(String configmapName) {
+        this.cbrConfigMap = configmapName;
+    }
+    
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    @Description("Name of the configmap containing the content based routing rules")
+    public String getCbrConfigMap() {
+        return this.cbrConfigMap;
+    }
+    
+    public void setRlConfigMap(String configmapName) {
+        this.rlConfigMap = configmapName;
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    @Description("Get the name of the configmap containing the rate limiting rules")
+    public String getRlConfigMap() {
+        return this.rlConfigMap;
     }
 }
